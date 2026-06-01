@@ -1,0 +1,118 @@
+"""
+EDA 보강 — 데이터 품질 점검 (결측치 / 중복 행 / 이상치)
+관점: 이상치는 제거 대상이 아니라 '특성 파악' 대상.
+출력: eda_6_outliers.png + 데이터 품질 요약 (터미널)
+"""
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib
+import seaborn as sns
+from sklearn.preprocessing import StandardScaler
+from sklearn.feature_selection import f_classif
+import warnings, platform, logging
+from pathlib import Path
+
+warnings.filterwarnings('ignore')
+logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
+_sys = platform.system()
+_font = 'AppleGothic' if _sys == 'Darwin' else ('Malgun Gothic' if _sys == 'Windows' else 'DejaVu Sans')
+matplotlib.rc('font', family=_font)
+matplotlib.rcParams['axes.unicode_minus'] = False
+
+# ── 설정 ─────────────────────────────────────────────────
+DATA_PATH  = Path(__file__).parent.parent / 'data' / 'features_14.csv'
+SAVE_DIR   = Path(__file__).parent / 'result'
+SAVE_DIR.mkdir(exist_ok=True)
+CLASS_NAMES = {1: '급가속', 2: '급우회전', 3: '급좌회전', 4: '급정거'}
+COLORS = ['#E24B4A', '#378ADD', '#1D9E75', '#BA7517']
+
+df = pd.read_csv(DATA_PATH)
+X  = df.drop(columns=['Target'])
+y  = df['Target']
+classes = sorted(y.unique())
+
+print("=" * 65)
+print("데이터 품질 점검")
+print("=" * 65)
+
+# ── 1. 결측치 ─────────────────────────────────────────────
+na_total = int(X.isna().sum().sum())
+print(f"\n[1] 결측치(NaN): 총 {na_total}개")
+if na_total > 0:
+    print(X.isna().sum()[X.isna().sum() > 0])
+else:
+    print("  → 결측치 없음")
+
+# ── 2. 중복 행 ────────────────────────────────────────────
+dup_rows = int(df.duplicated().sum())
+dup_rows_X = int(X.duplicated().sum())
+print(f"\n[2] 중복 행")
+print(f"  Target 포함 완전 중복 행: {dup_rows}개")
+print(f"  특징만 동일한 행:         {dup_rows_X}개")
+
+# ── 3. 이상치 특성 파악 (IQR & z-score) ───────────────────
+# 중복 특징 제거 후 표준화 기준
+corr = X.corr().abs().values.copy()
+np.fill_diagonal(corr, 0)
+cdf = pd.DataFrame(corr, index=X.columns, columns=X.columns)
+drop = set()
+for i, ci in enumerate(X.columns):
+    if ci in drop:
+        continue
+    for cj in X.columns[i+1:]:
+        if cj not in drop and cdf.loc[ci, cj] > 0.999:
+            drop.add(cj)
+X_clean = X.drop(columns=list(drop))
+feat_names = X_clean.columns.tolist()
+
+# IQR 방식: 특징별 이상치 개수
+def iqr_outlier_mask(s):
+    q1, q3 = s.quantile(0.25), s.quantile(0.75)
+    iqr = q3 - q1
+    return (s < q1 - 1.5 * iqr) | (s > q3 + 1.5 * iqr)
+
+iqr_counts = {f: int(iqr_outlier_mask(X_clean[f]).sum()) for f in feat_names}
+iqr_counts = dict(sorted(iqr_counts.items(), key=lambda x: -x[1]))
+
+# z-score 방식: |z| > 3 인 값을 하나라도 가진 행
+Xz = StandardScaler().fit_transform(X_clean)
+zrow_mask = (np.abs(Xz) > 3).any(axis=1)
+print(f"\n[3] 이상치 특성 파악 (IQR 1.5배 / z-score |z|>3)")
+print(f"  |z|>3 값을 하나 이상 가진 행: {int(zrow_mask.sum())}개 "
+      f"({zrow_mask.sum()/len(X_clean)*100:.1f}%)")
+print(f"  특징별 IQR 이상치 최다 5개:")
+for f, c in list(iqr_counts.items())[:5]:
+    print(f"    {f}: {c}개 ({c/len(X_clean)*100:.1f}%)")
+
+# 클래스별 이상치 집중도
+print(f"\n  클래스별 이상치 행(|z|>3) 분포:")
+for cls in classes:
+    m = (y == cls).values & zrow_mask
+    n_cls = int((y == cls).sum())
+    print(f"    클래스 {cls} ({CLASS_NAMES[cls]}): "
+          f"{int(m.sum())}/{n_cls}개 ({m.sum()/n_cls*100:.1f}%)")
+
+# ── 4. 박스플롯 (F-통계량 상위 6개 특징, 클래스별) ─────────
+f_stats, _ = f_classif(Xz, y)
+top6 = [feat_names[i] for i in np.argsort(f_stats)[-6:][::-1]]
+
+fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+for i, feat in enumerate(top6):
+    ax = axes[i // 3][i % 3]
+    data = [X_clean.loc[y == cls, feat].values for cls in classes]
+    bp = ax.boxplot(data, labels=[CLASS_NAMES[c] for c in classes],
+                    patch_artist=True, showfliers=True)
+    for patch, color in zip(bp['boxes'], COLORS):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.6)
+    ax.set_title(feat, fontsize=10)
+    ax.tick_params(axis='x', labelsize=8)
+plt.suptitle('⑥ 클래스별 박스플롯 (F-통계량 상위 6 특징)\n→ 이상치 분포 및 클래스 간 분리 특성 파악', y=1.0)
+plt.tight_layout()
+plt.savefig(f'{SAVE_DIR}/eda_6_outliers.png', dpi=150, bbox_inches='tight')
+plt.close()
+
+print(f"\n그림 저장: {SAVE_DIR}/eda_6_outliers.png")
+print("=" * 65)
